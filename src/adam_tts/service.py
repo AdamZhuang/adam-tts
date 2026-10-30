@@ -149,7 +149,7 @@ def status(ctx: Context | None, *, outdir: Path, tsv: Path | None) -> tuple[dict
     from adam_tts.errors import EXIT_PARTIAL
     from adam_tts.tsv import read_lines
 
-    outdir = Path(outdir).expanduser()
+    outdir = Path(outdir).expanduser().resolve()
     m = mf.load(outdir)
     if m is None:
         raise UsageError(f"{outdir} 下没有 manifest.json", hint="先运行 adam_tts synth")

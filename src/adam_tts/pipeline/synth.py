@@ -114,7 +114,8 @@ def plan_chunks(lines: list[Line], max_chars: int | None, max_bytes: int | None,
 
 class SynthRun:
     def __init__(self, ctx, tsv: Path, outdir: Path, rp: config_mod.ResolvedParams, opts: SynthOptions):
-        self.ctx, self.tsv, self.outdir, self.opts = ctx, Path(tsv), Path(outdir).expanduser(), opts
+        self.ctx, self.tsv, self.outdir, self.opts = ctx, Path(tsv), Path(outdir).expanduser().resolve(), opts
+        self.tsv = self.tsv.expanduser().resolve()
         self.lines = read_lines(self.tsv)
         self.scenes = group_scenes(self.lines)
         self.scene_index = {s: i for i, s in enumerate(self.scenes, 1)}
@@ -220,7 +221,7 @@ class SynthRun:
             wavs.append(w)
             chunk_meta.append(meta)
             log(f"    chunk {ci + 1}/{len(chunks)} chars={len(text)} {'cache' if hit else 'synth'} "
-                f"{len(w) / audio.SAMPLE_RATE:.2f}s")
+                f"{len(w) / audio.SAMPLE_RATE:.2f}s" + (f" in {meta['elapsed_s']:.1f}s" if not hit else ""))
         scene_wav = audio.concat(wavs, CHUNK_GAP_S)
         idx = self.scene_index[scene]
         seg_rel = f"segments/seg_{idx:02d}_{safe_name(scene)}.wav"
