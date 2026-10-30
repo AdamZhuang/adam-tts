@@ -244,10 +244,10 @@ ADAM_TTS_QWEN_HOME=
 
 1. **读 TSV**：列 `id, scene, text`，UTF-8，允许表头行；校验 id 唯一、同一场景的行连续。按 `--scene/--only` 选出要跑的场景。
 2. **解析参数**：按 §3 合并，做能力校验（不通过直接退出 4，不发任何请求）。
-3. **切块**：场景文本 = 各行直接拼接。超过后端上限时，优先在行边界切，单行仍超限再在句末标点（。！？；…）切，绝不在句中切。每块都加 `prefix`、同一个 `style`。
+3. **切块**：场景文本 = 各行拼接（上一行末尾没有标点时补「。」，与旧脚本一致）。超过后端上限时，优先在行边界切，单行仍超限再在句末标点（。！？；…）切，绝不在句中切。每块都加 `prefix`、同一个 `style`。
 4. **缓存键**：`sha256(backend, adapter_version, model, voice, style, prefix, speed, pitch, volume, lang, chunk_text)`。命中则复用 `.cache/` 中的音频，否则调用后端。
-5. **合成**：逐块合成，块之间按顺序拼接为场景音频 `segments/seg_XX_<scene>.wav`（XX 为场景在 TSV 中的序号）。
-6. **对齐切行**：对每块音频做强制对齐（文本不含 prefix），得到字级时间戳，偏移后合并为场景时间轴。每行区间 = 首字开始到末字结束；相邻两行的切点取两者之间静音的中点；首尾各留 50 ms。写 `lines/{id}.wav` 和场景 srt。
+5. **合成**：逐块合成，块之间插 0.15 s 静音，按顺序拼接为场景音频 `segments/seg_XX_<scene>.wav`（XX 为场景在 TSV 中的序号）。
+6. **对齐切行**：对每块音频做强制对齐（文本不含 prefix），得到字级时间戳，偏移后合并为场景时间轴。每行的语音区间 = 首字开始到末字结束（按对齐器对每行文本的分词数分配 token）。相邻两行的切点：同一块内，在两行的对齐间隙 ±80 ms 内找最长静音（10 ms 帧、相对峰值 -40 dB、至少 30 ms），取其中点（`silence`）；找不到静音就取间隙中点并标为弱切点（`gap_mid`，结果里 `weak_cuts` 列出）；跨块的切点取块间静音中点（`chunk`）。行音频 = [切点, 切点]，首行从 0、末行到场景结尾，所以各行音频首尾相接、总长等于场景音频。字幕时间用语音区间。写 `lines/{id}.wav` 和场景 srt。（M2 实现）
 7. **拼 full**：按 TSV 顺序拼接所有场景，场景间插 `--scene-gap` 静音，写 `full.wav` / `full.srt`。
 8. **写 manifest**：每完成一个场景就原子写入一次（临时文件 + rename），中途失败也能 `status`。
 
@@ -275,8 +275,9 @@ ADAM_TTS_QWEN_HOME=
   }],
   "lines": [{
     "id": "o1", "scene": "OP1", "text_hash": "...", "status": "done",
-    "path": "lines/o1.wav", "start_s": 0.05, "end_s": 4.10,
-    "align_confidence": 0.93, "error": null
+    "path": "lines/o1.wav", "start_s": 0.0, "end_s": 4.12,
+    "speech_start_s": 0.05, "speech_end_s": 4.03, "params_hash": "...",
+    "cut_after": "silence", "weak_cut": false, "error": null
   }]
 }
 ```
@@ -343,7 +344,7 @@ ADAM_TTS_QWEN_HOME=
 ## 11. 里程碑
 
 - **M1**：CLI 骨架（argparse、`--json`、退出码、配置/预设/密钥）+ mimo + edge 后端 + `say`、`voice list`、`doctor`、`--version` + 单元测试与 CI；在 Mac mini 上用 uv 装好。
-- **M2**：`synth` 场景级流水线 + 切块 + 缓存 + manifest + `align`（Qwen3-ForcedAligner）+ `status` + qwen 后端。
+- **M2**（已完成 2026-10-30）：`synth` 场景级流水线 + 切块 + 缓存 + manifest + `align`（Qwen3-ForcedAligner）+ `status` + qwen 后端。实现偏差：qwen 与对齐器各自在独立 worker 进程里运行（见 §12-4）；ffmpeg 改为可选（音频读写用 soundfile/numpy，libsndfile 能解 mp3）。
 - **M3**：doubao 后端 + 完整 SKILL.md（含最低版本、本地/远程调用）+ 本地 agent 软链 + 用一集真实台本跑通（mimo 草稿 + 局部重跑），本地和远程（`~/adam_tts_jobs/`）各跑一次。
 - **后续**：`render`（ffmpeg 出视频）、GUI（调用 CLI）、HTTP/MCP 薄封装、声音克隆、声音设计。
 
@@ -352,7 +353,7 @@ ADAM_TTS_QWEN_HOME=
 1. MiMo 单次请求的文本上限、返回 wav 的采样率、限流与计费——需实测后定默认切块长度。
 2. MiMo 有无音色列表 API？没有就维护静态表。
 3. 豆包：显式使用时默认哪个 2.0 音色？1024 字节上限是否也适用于 V3 HTTP 接口（文档计费页写的是按次 1024 字节）？
-4. qwen-tts 与 qwen-asr 能否装进 uv 为 adam_tts 建的同一个隔离环境（目前对齐器在单独的 `~/qwen3-tts/aligner/.venv`）？不能的话，对齐器改为调用配置里指定的 python 子进程（JSON 走 stdio）。
+4. ~~qwen-tts 与 qwen-asr 能否装进同一环境~~ **已定（M2）**：不能——qwen-tts 0.1.1 固定 transformers==4.57.3，qwen-asr 0.0.6 固定 4.57.6。adam_tts 本身保持轻量（不装 torch），qwen 模型和对齐器各在一个 worker 子进程里运行，默认用 `$ADAM_TTS_QWEN_HOME/.venv/bin/python` 与 `$ADAM_TTS_QWEN_HOME/aligner/.venv/bin/python`（JSON 行走 stdio，模型每次命令只加载一次）。可在 config.toml `[backends.qwen] python` / `[aligner] python` 改路径，`python = "self"` 表示用 adam_tts 自己的环境（此时装 `[qwen]` 或 `[align]` extra，二者互斥）。
 5. ForcedAligner 单次能处理的最长音频？长场景是否需要按块对齐（当前设计是按块对齐）。
 6. 默认 `--scene-gap`（暂定 0.5 s）和行切点策略（静音中点 + 50 ms 余量）是否合适。
 7. 可选想法（不进 v1）：加 `adam_tts skill install --target <dir>`，自动为本地 agent 的 skills 目录建软链。
