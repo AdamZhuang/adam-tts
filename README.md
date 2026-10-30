@@ -1,6 +1,6 @@
 # adam_tts
 
-给 agent 用的 TTS 工作台：一个 CLI（`adam_tts`）+ 一份 Skill（`skills/adam_tts/SKILL.md`，M3）。
+给 agent 用的 TTS 工作台：一个 CLI（`adam_tts`）+ 一份 Skill（[`skills/adam_tts/SKILL.md`](skills/adam_tts/SKILL.md)）。
 后端可插拔：`mimo`（小米 MiMo TTS，默认草稿）、`edge`（Edge TTS，兜底）、`qwen`（本地 Qwen3-TTS，M2）、`doubao`（豆包语音，M3，仅显式指定时使用）。
 
 设计文档：[docs/design.md](docs/design.md)
