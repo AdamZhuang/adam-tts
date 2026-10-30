@@ -56,7 +56,6 @@ class EdgeBackend:
     def synthesize(self, req: SynthRequest, out_wav: Path) -> SynthResult:
         import edge_tts
 
-        audio.require_ffmpeg()
         t0 = time.monotonic()
         with tempfile.TemporaryDirectory() as d:
             mp3 = Path(d) / "edge.mp3"

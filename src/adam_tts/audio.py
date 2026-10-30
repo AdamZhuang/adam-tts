@@ -1,4 +1,8 @@
-"""Audio helpers (stdlib wave + ffmpeg). Output standard: 24 kHz mono 16-bit PCM wav."""
+"""Audio helpers on numpy + soundfile. Standard output: 24 kHz mono 16-bit PCM wav.
+
+ffmpeg is optional: soundfile (libsndfile >= 1.1) decodes wav/flac/mp3 itself; ffmpeg is only used
+as a fallback decoder for formats libsndfile cannot read.
+"""
 
 from __future__ import annotations
 
@@ -7,23 +11,18 @@ import os
 import shutil
 import subprocess
 import tempfile
-import wave
 from pathlib import Path
 
-from adam_tts.errors import DependencyMissing, BackendError
+import numpy as np
+import soundfile as sf
+
+from adam_tts.errors import BackendError, DependencyMissing
 
 SAMPLE_RATE = 24000
 
 
 def ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
-
-
-def require_ffmpeg() -> str:
-    p = ffmpeg_path()
-    if not p:
-        raise DependencyMissing("找不到 ffmpeg", hint="macOS: brew install ffmpeg")
-    return p
 
 
 def ffmpeg_version() -> str | None:
@@ -37,85 +36,116 @@ def ffmpeg_version() -> str | None:
         return None
 
 
-def wav_info(data_or_path) -> tuple[int, int, int, float]:
-    """(sample_rate, channels, sampwidth, duration_s)."""
-    src = io.BytesIO(data_or_path) if isinstance(data_or_path, (bytes, bytearray)) else str(data_or_path)
-    with wave.open(src, "rb") as w:
-        sr, ch, sw, n = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
-    return sr, ch, sw, (n / sr if sr else 0.0)
+def _mono(x: np.ndarray) -> np.ndarray:
+    return x.mean(axis=1).astype(np.float32) if x.ndim == 2 else x.astype(np.float32)
 
 
-def wav_duration(path: Path) -> float:
-    return wav_info(path)[3]
+def resample(x: np.ndarray, sr_from: int, sr_to: int) -> np.ndarray:
+    if sr_from == sr_to or len(x) == 0:
+        return x.astype(np.float32)
+    n = int(round(len(x) * sr_to / sr_from))
+    t_old = np.arange(len(x)) / sr_from
+    t_new = np.arange(n) / sr_to
+    return np.interp(t_new, t_old, x).astype(np.float32)
 
 
-def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=path.suffix)
+def _ffmpeg_decode(src: Path, sr: int) -> np.ndarray:
+    ff = ffmpeg_path()
+    if not ff:
+        raise DependencyMissing(f"soundfile 无法解码 {src.suffix}，且找不到 ffmpeg", hint="macOS: brew install ffmpeg")
+    r = subprocess.run([ff, "-v", "error", "-i", str(src), "-f", "f32le", "-ac", "1", "-ar", str(sr), "-"],
+                       capture_output=True)
+    if r.returncode != 0:
+        raise BackendError(f"ffmpeg 解码失败: {r.stderr.decode(errors='ignore')[:300]}")
+    return np.frombuffer(r.stdout, dtype=np.float32).copy()
+
+
+def read_audio(src, sr: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode to mono float32 at `sr`. `src` is a path or bytes."""
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+        data, file_sr = sf.read(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else str(src),
+                                dtype="float32", always_2d=False)
+    except (sf.LibsndfileError, RuntimeError, TypeError):
+        if isinstance(src, (bytes, bytearray)):
+            with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+                f.write(src)
+            try:
+                return _ffmpeg_decode(Path(f.name), sr)
+            finally:
+                os.unlink(f.name)
+        return _ffmpeg_decode(Path(src), sr)
+    return resample(_mono(np.asarray(data)), file_sr, sr)
 
 
-def to_standard_wav(src: Path, dst: Path, sample_rate: int = SAMPLE_RATE) -> None:
-    """Convert any audio file to 24 kHz mono s16 wav via ffmpeg (atomic)."""
-    ff = require_ffmpeg()
+def write_wav(dst: Path, x: np.ndarray, sr: int = SAMPLE_RATE) -> None:
+    """Atomic 16-bit PCM mono wav write."""
+    dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=".tmp-", suffix=".wav")
     os.close(fd)
     try:
-        r = subprocess.run(
-            [ff, "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", str(sample_rate),
-             "-sample_fmt", "s16", tmp],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise BackendError(f"ffmpeg 转换失败: {r.stderr.strip()[:500]}")
+        sf.write(tmp, np.clip(np.asarray(x, dtype=np.float32), -1.0, 1.0), sr, subtype="PCM_16", format="WAV")
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
 
 
-def write_standard_wav_bytes(data: bytes, dst: Path, sample_rate: int = SAMPLE_RATE) -> None:
-    """Write wav bytes; pass through if already standard, else convert with ffmpeg."""
+def atomic_write_bytes(dst: Path, data: bytes) -> None:
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=".tmp-", suffix=dst.suffix)
     try:
-        sr, ch, sw, _ = wav_info(data)
-        standard = (sr, ch, sw) == (sample_rate, 1, 2)
-    except (wave.Error, EOFError):
-        standard = False
-    if standard:
-        atomic_write(dst, data)
-        return
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-        f.write(data)
-        raw = Path(f.name)
-    try:
-        to_standard_wav(raw, dst, sample_rate)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dst)
     finally:
-        raw.unlink(missing_ok=True)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
-def concat_wavs(parts: list[Path], dst: Path) -> None:
-    """Concatenate standard wavs (same format) into dst (atomic)."""
-    frames, params = [], None
-    for p in parts:
-        with wave.open(str(p), "rb") as w:
-            if params is None:
-                params = w.getparams()
-            elif (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (
-                params.framerate, params.nchannels, params.sampwidth):
-                raise BackendError(f"拼接的音频格式不一致: {p}")
-            frames.append(w.readframes(w.getnframes()))
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(params.nchannels)
-        w.setsampwidth(params.sampwidth)
-        w.setframerate(params.framerate)
-        w.writeframes(b"".join(frames))
-    atomic_write(dst, buf.getvalue())
+def is_standard_wav(data: bytes) -> bool:
+    try:
+        info = sf.info(io.BytesIO(data))
+    except Exception:  # noqa: BLE001
+        return False
+    return info.format == "WAV" and info.samplerate == SAMPLE_RATE and info.channels == 1 and info.subtype == "PCM_16"
+
+
+def write_standard_wav_bytes(data: bytes, dst: Path) -> None:
+    """Pass through if already 24k mono s16 wav; else decode + resample + write."""
+    if is_standard_wav(data):
+        atomic_write_bytes(dst, data)
+    else:
+        write_wav(dst, read_audio(data))
+
+
+def to_standard_wav(src: Path, dst: Path) -> None:
+    write_wav(dst, read_audio(src))
+
+
+def wav_info(path) -> tuple[int, int, float]:
+    """(sample_rate, channels, duration_s)."""
+    info = sf.info(str(path))
+    return info.samplerate, info.channels, info.frames / info.samplerate if info.samplerate else 0.0
+
+
+def wav_duration(path) -> float:
+    return wav_info(path)[2]
+
+
+def silence(seconds: float, sr: int = SAMPLE_RATE) -> np.ndarray:
+    return np.zeros(int(round(max(seconds, 0) * sr)), dtype=np.float32)
+
+
+def concat(parts: list[np.ndarray], gap_s: float = 0.0, sr: int = SAMPLE_RATE) -> np.ndarray:
+    out = []
+    for i, p in enumerate(parts):
+        if i and gap_s > 0:
+            out.append(silence(gap_s, sr))
+        out.append(np.asarray(p, dtype=np.float32))
+    return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+def concat_wavs(paths: list[Path], dst: Path, gap_s: float = 0.0) -> None:
+    write_wav(dst, concat([read_audio(p) for p in paths], gap_s))
