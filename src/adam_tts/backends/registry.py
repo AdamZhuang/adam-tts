@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from adam_tts.backends.edge import EdgeBackend
 from adam_tts.backends.mimo import MimoBackend
-from adam_tts.backends.stubs import DoubaoBackend, QwenBackend
+from adam_tts.backends.qwen import QwenBackend
+from adam_tts.backends.stubs import DoubaoBackend
 
 BACKENDS = {
     "qwen": QwenBackend,

@@ -1,4 +1,4 @@
-"""Backends registered in v1 but implemented in later milestones (qwen: M2, doubao: M3)."""
+"""Backends registered but implemented in a later milestone (doubao: M3)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class _Stub:
 
     def _err(self) -> NotImplementedBackend:
         return NotImplementedBackend(f"后端 {self.name} 已注册但尚未实现（计划在 {self.milestone}）",
-                                     hint="当前可用后端：mimo、edge")
+                                     hint="当前可用后端：mimo、edge、qwen")
 
     def list_voices(self, lang: str | None = None) -> list[VoiceInfo]:
         raise self._err()
@@ -32,14 +32,6 @@ class _Stub:
     def check(self, deep: bool = False) -> list[CheckResult]:
         return [CheckResult(f"{self.name}.implemented", "skip", f"not implemented ({self.milestone})",
                             self._err().exit_code)]
-
-
-class QwenBackend(_Stub):
-    name = "qwen"
-    milestone = "M2"
-
-    def capabilities(self, voice: str | None = None) -> Capabilities:
-        return Capabilities(style=True, prefix=True, lang=True, max_text_chars=600)
 
 
 class DoubaoBackend(_Stub):
