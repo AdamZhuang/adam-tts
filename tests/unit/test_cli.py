@@ -108,7 +108,7 @@ def test_mimo_missing_key_exit_3(capsys, tmp_path):
     assert code == 3 and "MIMO_API_KEY" in j(out)["error"]["message"]
 
 
-@pytest.mark.parametrize("backend", ["qwen", "doubao"])
+@pytest.mark.parametrize("backend", ["doubao"])
 def test_stub_backends_exit_8(capsys, tmp_path, backend):
     code, out, _ = run(capsys, "say", "x", "-o", str(tmp_path / "o.wav"), "--backend", backend, "--voice", "v",
                        "--json")
@@ -144,7 +144,8 @@ def test_doctor_healthy_and_never_prints_key(capsys, monkeypatch):
     assert code == 0 and r["ok"] and r["healthy"]
     assert r["secrets"]["MIMO_API_KEY"] == "env" and r["secrets"]["DOUBAO_API_KEY"] == "missing"
     names = {c["name"]: c for c in r["checks"]}
-    assert names["qwen.implemented"]["status"] == "skip" and not names["qwen.implemented"]["required"]
+    assert names["doubao.implemented"]["status"] == "skip" and not names["doubao.implemented"]["required"]
+    assert not names["qwen.model"]["required"]
     assert names["mimo.key"]["required"] and not names["doubao.key"]["required"]
     assert FAKE_KEY not in out + err
     code, out, err = run(capsys, "doctor")
