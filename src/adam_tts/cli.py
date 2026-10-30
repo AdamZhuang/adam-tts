@@ -58,10 +58,40 @@ def build_parser() -> argparse.ArgumentParser:
     vl.add_argument("--backend", required=True, choices=registry.names())
     vl.add_argument("--lang", help="按语言前缀过滤，如 zh / zh-CN")
 
+    sy = sub.add_parser("synth", help="按 lines.tsv 逐场景合成 → 对齐切行 → lines/*.wav + full.wav + manifest")
+    _global_opts(sy, suppress=True)
+    sy.add_argument("tsv", help="lines.tsv（id<TAB>scene<TAB>text）")
+    sy.add_argument("-o", "--outdir", required=True, help="输出目录（缓存和 manifest 也在这里）")
+    sy.add_argument("--scene", help="只做这些场景，逗号分隔")
+    sy.add_argument("--only", help="只更新这些行 id，逗号分隔（会重做其所在场景）")
+    sy.add_argument("--force", action="store_true", help="忽略缓存重新合成/对齐")
+    sy.add_argument("--allow-fallback", action="store_true", help="场景合成失败时用 fallback 预设（edge）重做")
+    sy.add_argument("--no-align", action="store_true", help="只合成场景音频，不切行")
+    sy.add_argument("--scene-gap", type=float, default=0.5, help="full.wav 中场景间静音秒数（默认 0.5）")
+    sy.add_argument("--dry-run", action="store_true", help="只显示计划（分块、缓存命中），不合成")
+    _synth_opts(sy)
+
+    st = sub.add_parser("status", help="查看输出目录的完成情况（done/missing/failed/stale）")
+    _global_opts(st, suppress=True)
+    st.add_argument("outdir")
+    st.add_argument("--tsv", help="对照的 lines.tsv（默认用 manifest 里记录的路径）")
+
+    al = sub.add_parser("align", help="对已有音频做强制对齐，输出时间戳 JSON + SRT")
+    _global_opts(al, suppress=True)
+    al.add_argument("audio")
+    al.add_argument("-o", "--outdir", required=True)
+    al.add_argument("--text")
+    al.add_argument("--text-file")
+    al.add_argument("--tsv")
+    al.add_argument("--scene")
+    al.add_argument("--lang", default="zh")
+    al.add_argument("--max-cue-chars", type=int, default=20, help="纯文本时每条字幕最多字数")
+
     d = sub.add_parser("doctor", help="检查密钥（不显示值）、后端、ffmpeg")
     _global_opts(d, suppress=True)
     d.add_argument("--backend", choices=registry.names(), help="只检查该后端（作为必需项）")
     d.add_argument("--deep", action="store_true", help="真合成一句短文本（会产生费用）")
+    d.add_argument("--require-aligner", action="store_true", help="对齐器检查失败也算不健康")
     return p
 
 
@@ -87,13 +117,49 @@ def _human_doctor(r: dict) -> str:
     return "\n".join(lines)
 
 
+def _emit_coded(r: dict, code: int, j: bool, human: str) -> None:
+    if j:
+        import json as _json
+        sys.stdout.write(_json.dumps({"ok": code == 0, **r}, ensure_ascii=False) + "\n")
+    else:
+        output.emit(r, False, human)
+
+
+def _human_synth(r: dict) -> str:
+    if r.get("dry_run"):
+        out = [f"plan for {r['outdir']} ({r['params']['backend']} / {r['params']['voice']})"]
+        for s in r["scenes"]:
+            out.append(f"  {s['scene']}: {len(s['lines'])} lines, {len(s['chunks'])} chunks"
+                       f"{' (fresh)' if s['fresh'] else ''}")
+        return "\n".join(out)
+    sc, ln = r["scenes"], r["lines"]
+    out = [f"{r['outdir']}: scenes done={len(sc['done'])} skipped={len(sc['skipped'])} failed={len(sc['failed'])}; "
+           f"lines {ln['done']}/{ln['total_selected']}; full={r['full_duration_s']}s; {r['elapsed_s']}s"]
+    if r["weak_cuts"]:
+        out.append("weak cuts after: " + ", ".join(w["after"] for w in r["weak_cuts"]))
+    if r.get("error"):
+        out.append(f"error: {r['error']['message']}")
+    return "\n".join(out)
+
+
+def _human_status(r: dict) -> str:
+    c = r["counts"]
+    out = [f"{r['outdir']}: done={c['done']} missing={c['missing']} failed={c['failed']} stale={c['stale']} "
+           f"/ {r['total']}" + (" (complete)" if r["complete"] else "")]
+    if r["weak_cuts"]:
+        out.append("weak cuts after: " + ", ".join(r["weak_cuts"]))
+    if r["suggested_command"]:
+        out.append("rerun: " + r["suggested_command"])
+    return "\n".join(out)
+
+
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     j = args.json
     if args.version:
         output.emit({"version": __version__}, j, f"adam_tts {__version__}")
         return 0
     if args.command is None:
-        raise UsageError("缺少命令", hint="可用命令: say, voice list, doctor")
+        raise UsageError("缺少命令", hint="可用命令: say, synth, status, align, voice list, doctor")
     ctx = service.Context(config_path=args.config, env_file=args.env_file)
 
     if args.command == "say":
@@ -113,8 +179,40 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         output.emit(r, j, _human_voices(r))
         return 0
 
+    if args.command == "synth":
+        from adam_tts.pipeline.synth import SynthOptions
+
+        def csv(v):
+            return [x.strip() for x in v.split(",") if x.strip()] if v else None
+
+        params = {k: getattr(args, k) for k in ("voice", "style", "prefix", "speed", "pitch", "volume", "lang")}
+        opts = SynthOptions(scenes=csv(args.scene), only=csv(args.only), force=args.force,
+                            no_align=args.no_align, allow_fallback=args.allow_fallback,
+                            scene_gap=args.scene_gap, dry_run=args.dry_run)
+        r, code = service.synth(ctx, tsv=Path(args.tsv), outdir=Path(args.outdir), preset=args.preset,
+                                backend=args.backend, params=params, opts=opts)
+        _emit_coded(r, code, j, _human_synth(r))
+        return code
+
+    if args.command == "status":
+        r, code = service.status(ctx, outdir=Path(args.outdir), tsv=Path(args.tsv) if args.tsv else None)
+        _emit_coded(r, code, j, _human_status(r))
+        return code
+
+    if args.command == "align":
+        n = sum(bool(x) for x in (args.text, args.text_file, args.tsv))
+        if n != 1:
+            raise UsageError("需要且只能给一个：--text / --text-file / --tsv(+--scene)")
+        text = args.text or (Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else None)
+        r = service.align(ctx, audio_path=Path(args.audio), outdir=Path(args.outdir), text=text,
+                          tsv=Path(args.tsv) if args.tsv else None, scene=args.scene, lang=args.lang,
+                          max_cue_chars=args.max_cue_chars)
+        output.emit(r, j, f"{r['srt']}  cues={r['cues']} unaligned={r['unaligned']} {r['duration_s']:.2f}s")
+        return 0
+
     if args.command == "doctor":
-        r, code = service.doctor(ctx, backend=args.backend, deep=args.deep)
+        r, code = service.doctor(ctx, backend=args.backend, deep=args.deep,
+                                 aligner="required" if args.require_aligner else "optional")
         if j:
             import json as _json
             sys.stdout.write(_json.dumps({"ok": code == 0, **r}, ensure_ascii=False) + "\n")

@@ -1,6 +1,6 @@
 [project]
 name = "adam_tts"
-version = "0.1.0"
+version = "0.2.0"
 description = "TTS workbench CLI + agent Skill (mimo / edge / qwen / doubao backends)"
 readme = "README.md"
 license = "MIT"
@@ -11,12 +11,17 @@ dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
     "edge-tts>=7.0",
+    "numpy>=2.4.6",
+    "soundfile>=0.14.0",
 ]
 
 [project.optional-dependencies]
-# M2: local Qwen3-TTS backend and forced aligner (Mac mini only)
-qwen = []
-align = []
+# Local Qwen3-TTS backend and forced aligner (Mac mini). Optional: by default the CLI runs the models
+# in worker processes under the existing envs ~/qwen3-tts/.venv and ~/qwen3-tts/aligner/.venv; these
+# extras are only needed with `python = "self"` in config.toml (single env). Note the two upstream
+# packages pin different transformers versions, so installing both into one env may not resolve.
+qwen = ["qwen-tts>=0.1.1", "torch>=2.4"]
+align = ["qwen-asr>=0.0.6", "torch>=2.4"]
 
 [project.scripts]
 adam_tts = "adam_tts.cli:main"
@@ -35,3 +40,7 @@ packages = ["src/adam_tts"]
 testpaths = ["tests"]
 markers = ["smoke: real backend calls; gated on env vars (ADAM_TTS_SMOKE=1)"]
 addopts = "-m 'not smoke'"
+
+[tool.uv]
+# qwen-tts pins transformers==4.57.3, qwen-asr pins 4.57.6: the two extras cannot share one env.
+conflicts = [[{ extra = "qwen" }, { extra = "align" }]]
