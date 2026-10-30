@@ -31,6 +31,7 @@ adam-tts/
 ├── src/adam_tts/
 │   ├── __main__.py           # python -m adam_tts
 │   ├── cli.py                # argparse 命令定义，只做参数解析 + 输出
+│   ├── service.py            # 各命令的实现（与 argparse 解耦，便于测试）
 │   ├── errors.py             # 异常类型 ↔ 退出码
 │   ├── output.py             # 人类可读 / --json 两种输出
 │   ├── config.py             # config.toml 读取、预设、参数合并
@@ -47,8 +48,8 @@ adam-tts/
 │   └── backends/
 │       ├── base.py           # TTSBackend Protocol、Capabilities、SynthRequest
 │       ├── registry.py
-│       ├── qwen.py  mimo.py  edge.py  doubao.py
-│       └── data/             # mimo_voices.json, doubao_voices.json（静态音色表）
+│       ├── qwen.py  mimo.py  edge.py  doubao.py   # M1 中 qwen/doubao 为 stubs.py 里的占位
+│       └── data/             # doubao_voices.json（静态音色表；mimo 的 9 个音色直接写在 mimo.py）
 ├── skills/adam_tts/SKILL.md   # Skill 唯一来源；本地 agent 的 skills 目录软链到这里
 └── tests/
     ├── unit/                 # FakeBackend / FakeAligner，无网络
@@ -65,7 +66,7 @@ CLI 框架选 **argparse**：零依赖；退出码和 `--json` 错误输出完�
 全局参数：`adam_tts --version`（`--json` 时输出 `{"version": "x.y.z"}`），供 agent 检查最低版本。
 
 通用参数（`say`/`synth` 共用）：
-`--preset NAME` · `--backend {qwen,mimo,edge,doubao}` · `--voice NAME`（原生名）· `--style TEXT` · `--prefix TEXT`（行首内联标签，如 `(平静 干练)`）· `--speed FLOAT`（倍率 0.5–2.0）· `--pitch` · `--volume` · `--lang`（qwen 用，默认 zh）· `--env-file PATH` · `--config PATH` · `--json` · `-v`。
+`--preset NAME` · `--backend {qwen,mimo,edge,doubao}` · `--voice NAME`（原生名）· `--style TEXT` · `--prefix TEXT`（行首内联标签，如 `(平静 干练)`）· `--speed FLOAT`（倍率 0.5–2.0）· `--pitch INT`（Hz 偏移，M1 仅 edge；doubao 的映射在 M3 定）· `--volume FLOAT`（倍率 0.5–2.0）· `--lang`（qwen 用，默认 zh）· `--env-file PATH` · `--config PATH` · `--json` · `-v`。
 
 参数合并规则：**命令行显式值 > 预设 > 后端默认**。
 - 什么都不传 = `--preset draft`。
@@ -77,7 +78,7 @@ CLI 框架选 **argparse**：零依赖；退出码和 `--json` 错误输出完�
 adam_tts say "要念的文本" -o out.wav [通用参数]
 adam_tts say --text-file t.txt -o out.wav --backend edge --voice zh-CN-YunxiNeural --speed 1.1
 ```
-输出：`out.wav`（24 kHz 单声道 16-bit）。`--json` 返回 `{ok, out, backend, voice, duration_s, elapsed_s, cache_hit}`。文本过长同样按句切块后拼接。
+输出：`out.wav`（24 kHz 单声道 16-bit）。`--json` 返回 `{ok, out, preset, backend, voice, style, prefix, speed, pitch, volume, lang, duration_s, elapsed_s, chunks, sample_rate}`。`say` 不走缓存（缓存只在 `synth` 的输出目录里）。文本过长同样按句切块后拼接。
 
 ### 3.2 `synth` —— 按场景批量合成
 ```
